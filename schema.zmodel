@@ -1,0 +1,414 @@
+datasource db {
+    provider = "postgresql" // Changed to PostgreSQL for better JSON support
+    url      = env("DATABASE_URL")
+}
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+enum UserRole {
+    ADMIN
+    INSTRUCTOR
+    STUDENT
+}
+
+enum SchoolRole {
+    SCHOOL_ADMIN
+    INSTRUCTOR
+    STUDENT
+}
+
+enum CourseStatus {
+    DRAFT
+    PUBLISHED
+    ARCHIVED
+}
+
+enum CourseVisibility {
+    PUBLIC
+    PRIVATE
+}
+
+enum CourseLevel {
+    BEGINNER
+    INTERMEDIATE
+    ADVANCED
+}
+
+enum EnrollmentStatus {
+    ACTIVE
+    COMPLETED
+    DROPPED
+}
+
+enum ContentType {
+    VIDEO
+    TEXT
+    QUIZ
+    DOCUMENT
+    INTERACTIVE
+}
+
+enum SubscriptionPlan {
+    FREE
+    BASIC
+    PREMIUM
+}
+
+enum SubscriptionStatus {
+    ACTIVE
+    CANCELED
+    EXPIRED
+}
+
+enum FileType {
+    AVATAR
+    COURSE_THUMBNAIL
+    LESSON_ATTACHMENT
+    SCHOOL_LOGO
+}
+
+// Main Models
+model User {
+    id             String           @id @default(uuid())
+    email          String           @unique
+    name           String
+    role           UserRole
+    bio            String?
+    avatar         File?            @relation(fields: [avatarId], references: [id])
+    avatarId       String?
+    createdAt      DateTime         @default(now())
+    updatedAt      DateTime         @updatedAt
+    // Relations
+    coursesOwned   Course[]         @relation("CourseInstructor")
+    enrollments    Enrollment[]
+    assignments    Assignment[]
+    submissions    Submission[]
+    comments       Comment[]
+    schools        SchoolMember[]
+    lessonProgress LessonProgress[]
+    auditLogs      AuditLog[]
+    quizAttempts   QuizAttempt[]    // Added this line
+
+    @@allow('create', true)
+    @@allow('read', true)
+    @@allow('update', auth() != null && id == auth().id)
+    @@allow('delete', auth().role == "ADMIN")
+}
+
+model School {
+    id           String         @id @default(uuid())
+    name         String
+    description  String?
+    logo         File?          @relation("SchoolLogo", fields: [logoId], references: [id])
+    logoId       String?
+    website      String?
+    createdAt    DateTime       @default(now())
+    updatedAt    DateTime       @updatedAt
+    // Relations
+    courses      Course[]
+    members      SchoolMember[]
+    subscription Subscription?
+    analytics    Analytics[]
+    files        File[]         @relation("SchoolFiles") // Changed relation name
+
+    @@allow('read', true)
+    @@allow('create', auth().role == "ADMIN")
+    @@allow('update', members?[user == auth() && role == "SCHOOL_ADMIN"])
+    @@allow('delete', auth().role == "ADMIN")
+}
+
+model SchoolMember {
+    id       String     @id @default(uuid())
+    school   School     @relation(fields: [schoolId], references: [id])
+    schoolId String
+    user     User       @relation(fields: [userId], references: [id])
+    userId   String
+    role     SchoolRole
+    joinedAt DateTime   @default(now())
+
+    @@unique([schoolId, userId])
+    @@allow('read', true)
+    @@allow('create', auth().role == "ADMIN" || school.members?[user == auth() && role == "SCHOOL_ADMIN"])
+    @@allow('delete', auth().role == "ADMIN" || school.members?[user == auth() && role == "SCHOOL_ADMIN"])
+}
+
+model Course {
+    id           String           @id @default(uuid())
+    title        String
+    description  String?
+    thumbnail    File?            @relation(fields: [thumbnailId], references: [id])
+    thumbnailId  String?
+    price        Float            @default(0) @gte(0)
+    status       CourseStatus     @default(DRAFT)
+    visibility   CourseVisibility @default(PRIVATE)
+    level        CourseLevel
+    createdAt    DateTime         @default(now())
+    updatedAt    DateTime         @updatedAt
+    // Relations
+    school       School           @relation(fields: [schoolId], references: [id])
+    schoolId     String
+    instructor   User             @relation("CourseInstructor", fields: [instructorId], references: [id])
+    instructorId String
+    enrollments  Enrollment[]
+    sections     Section[]
+    assignments  Assignment[]
+    discussions  Discussion[]
+
+    @@index([status, visibility])
+    @@allow('read', visibility == "PUBLIC" || enrollments?[user == auth()] || instructor == auth())
+    @@allow('create', school.members?[user == auth() && (role == "INSTRUCTOR" || role == "SCHOOL_ADMIN")])
+    @@allow('update', instructor == auth() && status != "ARCHIVED")
+    @@allow('delete', instructor == auth())
+}
+
+model Section {
+    id       String   @id @default(uuid())
+    title    String
+    order    Int
+    course   Course   @relation(fields: [courseId], references: [id])
+    courseId String
+    lessons  Lesson[]
+
+    @@index([courseId, order])
+    @@allow('read', course.visibility == "PUBLIC" || course.enrollments?[user == auth()])
+    @@allow('create,update,delete', course.instructor == auth())
+}
+
+model Lesson {
+    id          String           @id @default(uuid())
+    title       String
+    contentType ContentType
+    content     String
+    order       Int
+    duration    Int              @gte(0)
+    section     Section          @relation(fields: [sectionId], references: [id])
+    sectionId   String
+    isPreview   Boolean          @default(false)
+    // Relations
+    versions    LessonVersion[]
+    attachments File[]
+    progress    LessonProgress[]
+    quiz        Quiz?
+
+    @@index([sectionId, order])
+    @@allow('read', isPreview || section.course.visibility == "PUBLIC" || section.course.enrollments?[user == auth()])
+    @@allow('create,update,delete', section.course.instructor == auth())
+}
+
+model LessonVersion {
+    id        String   @id @default(uuid())
+    lesson    Lesson   @relation(fields: [lessonId], references: [id])
+    lessonId  String
+    content   String
+    version   Int
+    createdAt DateTime @default(now())
+
+    @@unique([lessonId, version])
+}
+
+model LessonProgress {
+    id           String   @id @default(uuid())
+    lesson       Lesson   @relation(fields: [lessonId], references: [id])
+    lessonId     String
+    user         User     @relation(fields: [userId], references: [id])
+    userId       String
+    completed    Boolean  @default(false)
+    lastAccessed DateTime @default(now())
+
+    @@unique([lessonId, userId])
+    @@allow('read', user == auth() || lesson.section.course.instructor == auth())
+    @@allow('create,update', user == auth())
+}
+
+model Enrollment {
+    id          String           @id @default(uuid())
+    course      Course           @relation(fields: [courseId], references: [id])
+    courseId    String
+    user        User             @relation(fields: [userId], references: [id])
+    userId      String
+    progress    Float            @default(0) @gte(0) @lte(100)
+    status      EnrollmentStatus @default(ACTIVE)
+    enrolledAt  DateTime         @default(now())
+    completedAt DateTime?
+
+    @@unique([courseId, userId])
+    @@index([status])
+    @@allow('read', user == auth() || course.instructor == auth())
+    @@allow('create', auth() != null)
+    @@allow('update', user == auth())
+    @@allow('delete', user == auth() || course.instructor == auth())
+}
+
+model Assignment {
+    id           String       @id @default(uuid())
+    title        String
+    description  String
+    dueDate      DateTime
+    course       Course       @relation(fields: [courseId], references: [id])
+    courseId     String
+    instructor   User         @relation(fields: [instructorId], references: [id])
+    instructorId String
+    submissions  Submission[]
+
+    @@index([courseId, dueDate])
+    @@allow('create', course.instructor == auth())
+    @@allow('read', course.enrollments?[user == auth()] || course.instructor == auth())
+    @@allow('update', instructor == auth())
+    @@allow('delete', instructor == auth())
+}
+
+model Submission {
+    id           String     @id @default(uuid())
+    content      String
+    grade        Float?     @lte(100)
+    feedback     String?
+    submittedAt  DateTime   @default(now())
+    assignment   Assignment @relation(fields: [assignmentId], references: [id])
+    assignmentId String
+    student      User       @relation(fields: [studentId], references: [id])
+    studentId    String
+
+    @@index([assignmentId, studentId])
+    @@allow('create', assignment.course.enrollments?[user == auth()])
+    @@allow('read', student == auth() || assignment.instructor == auth())
+    @@allow('update', assignment.instructor == auth())
+}
+
+model Quiz {
+    id           String        @id @default(uuid())
+    lesson       Lesson        @relation(fields: [lessonId], references: [id])
+    lessonId     String        @unique
+    questions    Question[]
+    timeLimit    Int?          @gte(1)
+    passingScore Float         @gte(0) @lte(100)
+    attempts     QuizAttempt[]
+
+    @@allow('read', lesson.section.course.enrollments?[user == auth()] || lesson.section.course.instructor == auth())
+    @@allow('create,update,delete', lesson.section.course.instructor == auth())
+}
+
+model Question {
+    id      String @id @default(uuid())
+    quiz    Quiz   @relation(fields: [quizId], references: [id])
+    quizId  String
+    content String
+    type    String
+    options Json
+    answer  String
+
+    @@allow('read', quiz.lesson.section.course.enrollments?[user == auth()] || quiz.lesson.section.course.instructor == auth())
+    @@allow('create,update,delete', quiz.lesson.section.course.instructor == auth())
+}
+
+model QuizAttempt {
+    id        String    @id @default(uuid())
+    quiz      Quiz      @relation(fields: [quizId], references: [id])
+    quizId    String
+    user      User      @relation(fields: [userId], references: [id])
+    userId    String
+    score     Float     @gte(0) @lte(100)
+    answers   Json
+    startedAt DateTime  @default(now())
+    endedAt   DateTime?
+
+    @@allow('read', user == auth() || quiz.lesson.section.course.instructor == auth())
+    @@allow('create', quiz.lesson.section.course.enrollments?[user == auth()])
+}
+
+model Discussion {
+    id        String    @id @default(uuid())
+    title     String
+    content   String
+    course    Course    @relation(fields: [courseId], references: [id])
+    courseId  String
+    comments  Comment[]
+    createdAt DateTime  @default(now())
+
+    @@index([courseId])
+    @@allow('read', course.enrollments?[user == auth()] || course.instructor == auth())
+    @@allow('create', course.enrollments?[user == auth()] || course.instructor == auth())
+}
+
+model Comment {
+    id           String     @id @default(uuid())
+    content      String
+    discussion   Discussion @relation(fields: [discussionId], references: [id])
+    discussionId String
+    user         User       @relation(fields: [userId], references: [id])
+    userId       String
+    createdAt    DateTime   @default(now())
+    updatedAt    DateTime   @updatedAt
+
+    @@index([discussionId])
+    @@allow('read', discussion.course.enrollments?[user == auth()] || discussion.course.instructor == auth())
+    @@allow('create', discussion.course.enrollments?[user == auth()] || discussion.course.instructor == auth())
+    @@allow('update', user == auth())
+    @@allow('delete', user == auth() || discussion.course.instructor == auth())
+}
+
+model File {
+    id                String   @id @default(uuid())
+    url               String
+    type              FileType
+    size              Int      @gte(0)
+    mimeType          String
+    name              String
+    school            School   @relation("SchoolFiles", fields: [schoolId], references: [id])
+    schoolId          String
+    uploadedBy        String
+    createdAt         DateTime @default(now())
+    
+    // Relations for different uses of files
+    userAvatar        User[]
+    courseThumbnail   Course[]
+    schoolLogo        School[] @relation("SchoolLogo")
+    lessonAttachments Lesson[]
+
+    @@index([type, schoolId])
+    @@allow('read', true)
+    @@allow('create', auth() != null && school.members?[user == auth()])
+    @@allow('delete', school.members?[user == auth() && role == "SCHOOL_ADMIN"])
+}
+
+model Subscription {
+    id        String             @id @default(uuid())
+    school    School             @relation(fields: [schoolId], references: [id])
+    schoolId  String             @unique
+    plan      SubscriptionPlan
+    startDate DateTime           @default(now())
+    endDate   DateTime?
+    status    SubscriptionStatus
+    features  Json               // Store enabled features based on plan
+
+    @@allow('read', school.members?[user == auth()])
+    @@allow('create,update,delete', auth().role == "ADMIN")
+}
+
+model Analytics {
+    id       String   @id @default(uuid())
+    school   School   @relation(fields: [schoolId], references: [id])
+    schoolId String
+    metric   String
+    value    Float
+    period   DateTime
+    metadata Json?    // Additional context for the metric
+
+    @@index([schoolId, metric, period])
+    @@allow('read', school.members?[user == auth() && role == "SCHOOL_ADMIN"])
+}
+
+model AuditLog {
+    id        String   @id @default(uuid())
+    action    String   // CREATE, UPDATE, DELETE
+    model     String   // Which model was affected
+    recordId  String   // ID of the affected record
+    user      User     @relation(fields: [userId], references: [id])
+    userId    String   // Who performed the action
+    changes   Json     // What changed
+    createdAt DateTime @default(now())
+
+    @@index([model, recordId])
+    @@allow('read', auth().role == "ADMIN")
+}
